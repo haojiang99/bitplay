@@ -14,7 +14,6 @@ let settings = {
   jackettApiKey: "",
 };
 
-const searchWrapper = document.querySelector("#search-wrapper");
 var player = null;
 
 function doubleTapFF(options) {
@@ -65,24 +64,7 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
   const toggleDarkModeButton = document.querySelector("#toggle_theme");
   toggleDarkModeButton.addEventListener("click", toggleDarkMode);
 
-  // handle past button
-  const pastButton = document.querySelector("#copy_magnet");
-  pastButton.addEventListener("click", async () => {
-    navigator.clipboard.readText().then((text) => {
-      document.getElementById("magnet").value = text;
-    });
-  });
-
-  // handle demo button
-  const demoButton = document.querySelector("#demo_torrent");
-  demoButton.addEventListener("click", async () => {
-    document.getElementById("magnet").value =
-      "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fsintel.torrent";
-
-    document
-      .querySelector("#torrent-form")
-      .dispatchEvent(new Event("submit"));
-  });
+  // paste button and demo button removed from UI
 
   const form = document.querySelector("#torrent-form");
   form.addEventListener("submit", async (e) => {
@@ -104,18 +86,21 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
     if (player) {
       player.dispose();
       player = null;
-      const vidElm = document.createElement("video");
-      vidElm.setAttribute("id", "video-player");
-      vidElm.setAttribute("class", "video-js mt-10 w-full");
-
-      document.querySelector("main").appendChild(vidElm);
     }
 
-    form
-      .querySelector("button[type=submit]")
-      .setAttribute("disabled", "disabled");
-    form.querySelector("button[type=submit]").innerHTML = "";
-    form.querySelector("button[type=submit]").classList.add("loader");
+    // Create video element in modal wrapper if it exists, otherwise in main
+    const modalWrapper = document.querySelector("#modal-video-player-wrapper");
+    const videoContainer = modalWrapper || document.querySelector("main");
+
+    // Clear the container and create new video element
+    if (modalWrapper) {
+      modalWrapper.innerHTML = '';
+    }
+
+    const vidElm = document.createElement("video");
+    vidElm.setAttribute("id", "video-player");
+    vidElm.setAttribute("class", "video-js w-full h-full");
+    videoContainer.appendChild(vidElm);
 
     const res = await fetch("/api/v1/torrent/add", {
       method: "POST",
@@ -132,14 +117,6 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
         dismissable: true,
         type: "error",
       });
-      form.querySelector("button[type=submit]").removeAttribute("disabled");
-      form.querySelector("button[type=submit]").innerHTML = "Play Now";
-      form.querySelector("button[type=submit]").classList.remove("loader");
-      searchResults.querySelectorAll("#play-torrent").forEach((el) => {
-        el.removeAttribute("disabled");
-        el.innerHTML = "Watch";
-        el.classList.remove("loader");
-      });
       return;
     }
 
@@ -154,14 +131,6 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
         icon: true,
         dismissable: true,
         type: "error",
-      });
-      form.querySelector("button[type=submit]").removeAttribute("disabled");
-      form.querySelector("button[type=submit]").innerHTML = "Play Now";
-      form.querySelector("button[type=submit]").classList.remove("loader");
-      document.querySelectorAll("#play-torrent").forEach((el) => {
-        el.removeAttribute("disabled");
-        el.innerHTML = "Watch";
-        el.classList.remove("loader");
       });
       return;
     }
@@ -180,14 +149,6 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
         icon: true,
         dismissable: true,
         type: "error",
-      });
-      form.querySelector("button[type=submit]").removeAttribute("disabled");
-      form.querySelector("button[type=submit]").innerHTML = "Play Now";
-      form.querySelector("button[type=submit]").classList.remove("loader");
-      document.querySelectorAll("#play-torrent").forEach((el) => {
-        el.removeAttribute("disabled");
-        el.innerHTML = "Watch";
-        el.classList.remove("loader");
       });
       return;
     }
@@ -211,7 +172,6 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
         let langName = "English";
 
         // Try to extract language code from filename
-        console.log(subFile.name);
         const langMatch = subFile.name.match(/\.([a-z]{2,3})\.(srt|vtt|sub)$/i);
         if (langMatch) {
           language = langMatch[1];
@@ -274,13 +234,8 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
     player.doubleTapFF();
 
     document.querySelector("#video-player").style.display = "block";
-    // scroll to video player
-    setTimeout(() => {
-      window.scrollTo({
-        top: document.body.scrollHeight,
-        behavior: "smooth",
-      });
 
+    setTimeout(() => {
       if (videoUrls.length > 1) {
         const videoSelect = document.createElement("select");
         videoSelect.setAttribute("id", "video-select");
@@ -304,15 +259,6 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
       }
       player.play()
     }, 300);
-
-    form.querySelector("button[type=submit]").removeAttribute("disabled");
-    form.querySelector("button[type=submit]").innerHTML = "Play Now";
-    form.querySelector("button[type=submit]").classList.remove("loader");
-    document.querySelectorAll("#play-torrent").forEach((el) => {
-      el.removeAttribute("disabled");
-      el.innerHTML = "Watch";
-      el.classList.remove("loader");
-    });
   });
 
   // create switch button
@@ -331,217 +277,8 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
     });
   });
 
-  document.querySelector("#settings-btn").addEventListener("click", () => {
-    document.querySelector("#settings-model").classList.toggle("hidden");
-  });
-
-  document.querySelectorAll("#close-settings").forEach((el) => {
-    el.addEventListener("click", () => {
-      document.querySelector("#settings-model").classList.toggle("hidden");
-      document.querySelector("#proxy-result").classList.remove("flex");
-    document.querySelector("#proxy-result").classList.add("hidden");
-    });
-  });
-
-  document.querySelectorAll(".tab-btn").forEach((el) => {
-    el.addEventListener("click", () => {
-      const tabIndex = el.getAttribute("data-index");
-      document.querySelectorAll(".tab").forEach((tab) => {
-        const index = tab.getAttribute("data-tab");
-        if (index === tabIndex) {
-          tab.classList.remove("hidden");
-          document.querySelectorAll(".tab-btn").forEach((el) => {
-            el.classList.remove("bg-primary", "text-primary-foreground");
-            el.classList.add("bg-muted");
-          });
-          el.classList.add("bg-primary", "text-primary-foreground");
-        } else {
-          tab.classList.add("hidden");
-        }
-      });
-    });
-  });
-
-  function generatePagination(currentPage, pageSize, total, target) {
-    const pagination = document.querySelector(target);
-    if (!pagination) return;
-    pagination.classList.remove("hidden");
-    pagination.innerHTML = "";
-    const totalPages = Math.ceil(total / pageSize);
-    const startPage = Math.max(1, currentPage - 2);
-    const endPage = Math.min(totalPages, currentPage + 2);
-
-    for (let i = startPage; i <= endPage; i++) {
-      const pageButton = document.createElement("button");
-      pageButton.textContent = i;
-      pageButton.classList.add("page-button");
-      if (i === currentPage) {
-        pageButton.classList.add("active");
-      }
-      pageButton.addEventListener("click", () => {
-        searchPage = i;
-        updateSearchResults();
-      });
-      pagination.appendChild(pageButton);
-    }
-    const prevButton = document.createElement("button");
-    prevButton.innerHTML = `<svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 20 20" aria-hidden="true" height="1em" width="1em" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M4.72 9.47a.75.75 0 0 0 0 1.06l4.25 4.25a.75.75 0 1 0 1.06-1.06L6.31 10l3.72-3.72a.75.75 0 1 0-1.06-1.06L4.72 9.47Zm9.25-4.25L9.72 9.47a.75.75 0 0 0 0 1.06l4.25 4.25a.75.75 0 1 0 1.06-1.06L11.31 10l3.72-3.72a.75.75 0 0 0-1.06-1.06Z" clip-rule="evenodd"></path></svg>`;
-    prevButton.classList.add("page-button");
-    prevButton.disabled = currentPage === 1;
-    prevButton.addEventListener("click", () => {
-      if (currentPage > 1) {
-        searchPage--;
-        updateSearchResults();
-      }
-    });
-    pagination.prepend(prevButton);
-    const nextButton = document.createElement("button");
-    nextButton.innerHTML = `<svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 20 20" aria-hidden="true" height="1em" width="1em" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M15.28 9.47a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 1 1-1.06-1.06L13.69 10 9.97 6.28a.75.75 0 0 1 1.06-1.06l4.25 4.25ZM6.03 5.22l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L8.69 10 4.97 6.28a.75.75 0 0 1 1.06-1.06Z" clip-rule="evenodd"></path></svg>`;
-    nextButton.classList.add("page-button");
-    nextButton.disabled = currentPage === totalPages;
-    nextButton.addEventListener("click", () => {
-      if (currentPage < totalPages) {
-        searchPage++;
-        updateSearchResults();
-      }
-    });
-    pagination.appendChild(nextButton);
-  }
-
-  let searchData = [];
-  let searchPage = 1;
-  let searchPageSize = 5;
-
-  const updateSearchResults = () => {
-    const searchPagination = document.querySelector("#search-pagination");
-    const searchResults = document.querySelector("#search-result");
-    searchResults.classList.remove("hidden");
-    searchResults.querySelector("tbody").innerHTML = "";
-    searchResults.querySelector("tfoot").classList.add("hidden");
-    if (searchData.length === 0) {
-      searchResults.querySelector("tfoot").classList.remove("hidden");
-      return;
-    }
-
-    const start = (searchPage - 1) * searchPageSize;
-    const end = start + searchPageSize;
-    const results = searchData.slice(start, end);
-    results.forEach((result) => {
-      const resultDiv = document.createElement("tr");
-      resultDiv.innerHTML = `
-        <td>${result.title}</td>
-        <td>${result.indexer}</td>
-        <td>${result.size}</td>
-        <td>${result.leechers}/${result.seeders}</td>
-        <td><button id="play-torrent" type="button" class="btn small" data-magnet="${
-          result.downloadUrl || result.magnetUrl
-        }">Watch</button></td>
-      `;
-      searchResults.querySelector("tbody").appendChild(resultDiv);
-    });
-
-    // Generate pagination
-    const totalResults = searchData.length;
-    const totalPages = Math.ceil(totalResults / searchPageSize);
-    generatePagination(
-      searchPage,
-      searchPageSize,
-      totalResults,
-      "#search-pagination"
-    );
-
-    // Add event listener to each play button
-    searchResults.querySelectorAll("#play-torrent").forEach((el) => {
-      el.addEventListener("click", async (e) => {
-        const magnet = e.target.getAttribute("data-magnet");
-        document.querySelector("#magnet").value = magnet;
-        document
-          .querySelector("#torrent-form")
-          .dispatchEvent(new Event("submit"));
-        e.target.setAttribute("disabled", "disabled");
-        e.target.innerHTML = "";
-        e.target.classList.add("loader");
-      });
-    });
-  };
-
-  document.querySelector("#search-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const query = e.target.querySelector("#search").value;
-    if (!query) {
-      butterup.toast({
-        message: "Please enter a search query",
-        location: "top-right",
-        icon: true,
-        dismissable: true,
-        type: "error",
-      });
-      return;
-    }
-
-    searchData = [];
-    searchPage = 1;
-
-    e.target
-      .querySelector("button[type=submit]")
-      .setAttribute("disabled", "disabled");
-    e.target.querySelector("button[type=submit]").classList.add("loader");
-    e.target.querySelector("button[type=submit]").innerHTML = "";
-    const searchResults = document.querySelector("#search-result");
-
-    searchResults.classList.add("hidden");
-    document.querySelector("#search-pagination").classList.add("hidden");
-
-    let apiUrl = "/api/v1/prowlarr/search";
-
-    if (
-      (!settings.prowlarrHost || !settings.prowlarrApiKey) &&
-      settings.jackettHost &&
-      settings.jackettApiKey
-    ) {
-      apiUrl = "/api/v1/jackett/search";
-    }
-
-    fetch(`${apiUrl}?q=${query}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(res.error || "Failed to fetch search results");
-        }
-        return res.json();
-      })
-      .then((data) => {
-        if (data && typeof data === "object") {
-          searchData = data;
-        } else {
-          searchData = [];
-        }
-
-        updateSearchResults();
-      })
-      .catch((error) => {
-        console.error("There was a problem with the fetch operation:", error);
-        butterup.toast({
-          message: error.message || "Failed to fetch search results",
-          location: "top-right",
-          icon: true,
-          dismissable: true,
-          type: "error",
-        });
-      })
-      .finally(() => {
-        e.target
-          .querySelector("button[type=submit]")
-          .removeAttribute("disabled");
-        e.target
-          .querySelector("button[type=submit]")
-          .classList.remove("loader");
-        e.target.querySelector("button[type=submit]").innerHTML = "Search";
-      });
-  });
+  // Settings button and related functionality removed
+  // Search form and related functionality removed
 
   const testProwlarrConfig = async () => {
     const prowlarrHost = document.querySelector("#prowlarrHost").value;
@@ -927,109 +664,7 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
     submitButton.innerHTML = "Save Settings";
   });
 
-  document.querySelector("#torrent_file").addEventListener("change", (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const formData = new FormData();
-      formData.append("torrent", file);
-
-      fetch("/api/v1/torrent/convert", {
-        method: "POST",
-        body: formData,
-      })
-        .then(async (res) => {
-          if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.error || "Failed to upload torrent file");
-          }
-          return res.json();
-        })
-        .then((data) => {
-          document.querySelector("#magnet").value = data.magnet;
-          document
-            .querySelector("#torrent-form")
-            .dispatchEvent(new Event("submit"));
-        })
-        .catch((error) => {
-          console.error("There was a problem with the fetch operation:", error);
-          butterup.toast({
-            message: error.message || "Failed to upload torrent file",
-            location: "top-right",
-            icon: true,
-            dismissable: true,
-            type: "error",
-          });
-        });
-    }
-  });
-
-  const torrentFileWrapper = document.querySelector("#torrent_file_wrapper");
-  torrentFileWrapper.addEventListener("dragenter", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    torrentFileWrapper.classList.add("drag-over");
-  });
-  torrentFileWrapper.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-  });
-  torrentFileWrapper.addEventListener("dragleave", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    torrentFileWrapper.classList.remove("drag-over");
-  });
-  torrentFileWrapper.addEventListener("drop", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    torrentFileWrapper.classList.remove("drag-over");
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      const file = files[0];
-      if (file.name.endsWith(".torrent")) {
-        const formData = new FormData();
-        formData.append("torrent", file);
-
-        fetch("/api/v1/torrent/convert", {
-          method: "POST",
-          body: formData,
-        })
-          .then(async (res) => {
-            if (!res.ok) {
-              const err = await res.json();
-              throw new Error(err.error || "Failed to upload torrent file");
-            }
-            return res.json();
-          })
-          .then((data) => {
-            document.querySelector("#magnet").value = data.magnet;
-            document
-              .querySelector("#torrent-form")
-              .dispatchEvent(new Event("submit"));
-          })
-          .catch((error) => {
-            console.error(
-              "There was a problem with the fetch operation:",
-              error
-            );
-            butterup.toast({
-              message: error.message || "Failed to upload torrent file",
-              location: "top-right",
-              icon: true,
-              dismissable: true,
-              type: "error",
-            });
-          });
-      } else {
-        butterup.toast({
-          message: "Please drop a valid torrent file",
-          location: "top-right",
-          icon: true,
-          dismissable: true,
-          type: "error",
-        });
-      }
-    }
-  });
+  // Torrent file upload functionality removed
 
   // fetch settings
   fetch("/api/v1/settings")
@@ -1066,13 +701,6 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
           wrapper.classList.remove("bg-primary");
         }
       });
-
-      // Check if Prowlarr or Jackett is enabled
-      if (data?.enableProwlarr || data?.enableJackett) {
-        searchWrapper.classList.remove("hidden");
-      } else {
-        searchWrapper.classList.add("hidden");
-      }
     })
     .catch((error) => {
       console.error("There was a problem with the fetch operation:", error);

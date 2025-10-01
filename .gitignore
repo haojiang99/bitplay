@@ -1,1 +1,17 @@
 /.DS_Store
+
+# Build artifacts
+bitplay
+bitplay.exe
+torrent-data/
+config/
+
+# Node modules and build
+node_modules/
+client/assets/app.js
+client/assets/main.css
+client/assets/chunks/
+
+# Editor directories
+.vscode/
+.idea/

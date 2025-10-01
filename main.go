@@ -28,6 +28,11 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+func init() {
+	// Disable all log output
+	log.SetOutput(io.Discard)
+}
+
 var (
 	currentSettings Settings
 	settingsMutex   sync.RWMutex
@@ -200,6 +205,18 @@ func initTorrentWithProxy() (*torrent.Client, int, error) {
 	port := getAvailablePort()
 	config.ListenPort = port
 
+	// Disable uploading/seeding
+	config.NoUpload = true
+	config.Seed = false
+	config.DisableTrackers = false // Keep trackers for getting peers
+	config.DisablePEX = true        // Disable peer exchange
+	config.DisableIPv6 = false
+
+	// Set upload rate to 0 to prevent any uploading
+	config.UploadRateLimiter = nil
+
+	log.Println("Torrent client configured: Download-only mode (no uploading/seeding)")
+
 	if enableProxy {
 		log.Println("Creating torrent client with proxy...")
 		os.Setenv("ALL_PROXY", proxyURL)
@@ -341,6 +358,9 @@ func main() {
 	http.HandleFunc("/api/v1/jackett/test", testJackettConnection)
 	http.HandleFunc("/api/v1/proxy/test", testProxyConnection)
 	http.HandleFunc("/api/v1/torrent/convert", convertTorrentToMagnetHandler)
+	http.HandleFunc("/api/v1/yts/movies", fetchYTSMovies)
+	http.HandleFunc("/api/v1/avmoo/movies", fetchAvmooMovies)
+	http.HandleFunc("/api/v1/avmoo/movie/", fetchAvmooMovieDetail)
 
 	// Set up client file serving
 	http.Handle("/", http.FileServer(http.Dir("./client")))
@@ -353,10 +373,9 @@ func main() {
 
 	go cleanupSessions()
 
-	port := 3347
+	port := 3147
 
-	addr := fmt.Sprintf(":%d", port)
-	log.Printf("Attempting to start server on %s", addr)
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
 
 	// Create channel to signal if server started successfully
 	serverStarted := make(chan bool, 1)
@@ -371,7 +390,6 @@ func main() {
 	go func() {
 		err := server.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			log.Printf("Server failed on %s: %v", addr, err)
 			serverStarted <- false
 		}
 	}()
@@ -380,14 +398,10 @@ func main() {
 	select {
 	case success := <-serverStarted:
 		if !success {
-			log.Printf("Server failed to start on %s", addr)
 			return
 		}
 	case <-time.After(1 * time.Second):
 		// No immediate error, assume it started successfully
-		log.Printf("🚀 Server successfully started on %s", addr)
-
-		// Create a simple message to display in the browser
 		fmt.Printf("\n------------------------------------------------\n")
 		fmt.Printf("✅ Server started! Open in your browser:\n")
 		fmt.Printf("   http://localhost:%d\n", port)
@@ -1357,6 +1371,694 @@ func saveJackettSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, map[string]string{"message": "Jackett settings saved successfully"})
+}
+
+// Fetch YTS Movies Handler - Uses YTS API directly
+func fetchYTSMovies(w http.ResponseWriter, r *http.Request) {
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight requests
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get query parameters
+	requestedPage := r.URL.Query().Get("page")
+	if requestedPage == "" {
+		requestedPage = "1"
+	}
+	pageNum, _ := strconv.Atoi(requestedPage)
+
+	searchQuery := r.URL.Query().Get("query")
+
+	client := createSelectiveProxyClient()
+
+	// Use YTS API directly - much simpler and returns all movies
+	apiURL := fmt.Sprintf("https://yts.mx/api/v2/list_movies.json?page=%d&limit=20&sort_by=date_added&order_by=desc", pageNum)
+
+	// Add search query if provided
+	if searchQuery != "" {
+		apiURL = fmt.Sprintf("https://yts.mx/api/v2/list_movies.json?page=%d&limit=20&query_term=%s", pageNum, url.QueryEscape(searchQuery))
+	}
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create request"})
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch movies"})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to read response"})
+		return
+	}
+
+	var apiResp map[string]interface{}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to parse response"})
+		return
+	}
+
+	// Add magnet URLs to torrents
+	if data, ok := apiResp["data"].(map[string]interface{}); ok {
+		if movies, ok := data["movies"].([]interface{}); ok {
+			for _, movieInterface := range movies {
+				if movie, ok := movieInterface.(map[string]interface{}); ok {
+					if title, ok := movie["title"].(string); ok {
+						if torrents, ok := movie["torrents"].([]interface{}); ok {
+							for _, torrentInterface := range torrents {
+								if torrent, ok := torrentInterface.(map[string]interface{}); ok {
+									if hash, ok := torrent["hash"].(string); ok {
+										quality := ""
+										if q, ok := torrent["quality"].(string); ok {
+											quality = q
+										}
+										magnetLink := fmt.Sprintf("magnet:?xt=urn:btih:%s&dn=%s+%s&tr=udp://open.demonii.com:1337/announce&tr=udp://tracker.openbittorrent.com:80&tr=udp://tracker.coppersurfer.tk:6969&tr=udp://glotorrents.pw:6969/announce&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://torrent.gresille.org:80/announce&tr=udp://p4p.arenabg.com:1337&tr=udp://tracker.leechers-paradise.org:6969",
+											hash,
+											strings.ReplaceAll(title, " ", "+"),
+											quality)
+										torrent["magnetUrl"] = magnetLink
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	respondWithJSON(w, http.StatusOK, apiResp)
+}
+
+func fetchMovieTorrents(client *http.Client, title string, movieData map[string]interface{}) []interface{} {
+	// Search for movie by title using YTS API
+	searchURL := fmt.Sprintf("https://yts.mx/api/v2/list_movies.json?query_term=%s&limit=1", url.QueryEscape(title))
+
+	req, err := http.NewRequest("GET", searchURL, nil)
+	if err != nil {
+		return []interface{}{}
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return []interface{}{}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return []interface{}{}
+	}
+
+	var apiResp map[string]interface{}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return []interface{}{}
+	}
+
+	// Extract torrents and movie metadata from first matching movie
+	if data, ok := apiResp["data"].(map[string]interface{}); ok {
+		if movies, ok := data["movies"].([]interface{}); ok && len(movies) > 0 {
+			if movie, ok := movies[0].(map[string]interface{}); ok {
+				// Update cover images from API
+				if img, ok := movie["medium_cover_image"].(string); ok {
+					movieData["medium_cover_image"] = img
+				}
+				if img, ok := movie["large_cover_image"].(string); ok {
+					movieData["large_cover_image"] = img
+				}
+
+				if torrents, ok := movie["torrents"].([]interface{}); ok {
+					// Add magnet links to each torrent
+					for _, torrent := range torrents {
+						if torrentMap, ok := torrent.(map[string]interface{}); ok {
+							if hash, ok := torrentMap["hash"].(string); ok {
+								quality := ""
+								if q, ok := torrentMap["quality"].(string); ok {
+									quality = q
+								}
+								magnetLink := fmt.Sprintf("magnet:?xt=urn:btih:%s&dn=%s+%s&tr=udp://open.demonii.com:1337/announce&tr=udp://tracker.openbittorrent.com:80&tr=udp://tracker.coppersurfer.tk:6969&tr=udp://glotorrents.pw:6969/announce&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://torrent.gresille.org:80/announce&tr=udp://p4p.arenabg.com:1337&tr=udp://tracker.leechers-paradise.org:6969",
+									hash,
+									strings.ReplaceAll(title, " ", "+"),
+									quality)
+								torrentMap["magnetUrl"] = magnetLink
+							}
+						}
+					}
+					return torrents
+				}
+			}
+		}
+	}
+
+	return []interface{}{}
+}
+
+func parseYTSMovies(html string) ([]map[string]interface{}, int) {
+	var movies []map[string]interface{}
+	totalPages := 1
+
+	// Extract total pages from pagination
+	// Look for pagination links like ?page=2, ?page=3, etc.
+	if idx := strings.Index(html, `class="tsc_pagination`); idx != -1 {
+		paginationSection := html[idx:min(idx+2000, len(html))]
+		// Find all page numbers
+		maxPage := 1
+		pageMarkers := strings.Split(paginationSection, `?page=`)
+		for _, marker := range pageMarkers {
+			if endIdx := strings.IndexAny(marker, `">"`); endIdx != -1 {
+				pageNumStr := marker[:endIdx]
+				if pageNum, err := strconv.Atoi(pageNumStr); err == nil && pageNum > maxPage {
+					maxPage = pageNum
+				}
+			}
+		}
+		totalPages = maxPage
+	}
+
+	// Split by movie cards
+	parts := strings.Split(html, `<div class="browse-movie-wrap`)
+
+	for i := 1; i < len(parts); i++ {
+		part := parts[i]
+
+		movie := make(map[string]interface{})
+
+		// Extract movie link and ID
+		if idx := strings.Index(part, `href="https://yts.mx/movies/`); idx != -1 {
+			linkStart := idx + len(`href="https://yts.mx/movies/`)
+			if linkEnd := strings.Index(part[linkStart:], `"`); linkEnd != -1 {
+				slug := part[linkStart : linkStart+linkEnd]
+				movie["slug"] = slug
+			}
+		}
+
+		// Extract title
+		if idx := strings.Index(part, `class="browse-movie-title"`); idx != -1 {
+			titleStart := strings.Index(part[idx:], `>`) + idx + 1
+			if titleEnd := strings.Index(part[titleStart:], `</a>`); titleEnd != -1 {
+				title := part[titleStart : titleStart+titleEnd]
+				// Remove [ZH] tag if present
+				title = strings.TrimSpace(strings.ReplaceAll(title, `<span style="color: #ACD7DE; font-size: 75%;">[ZH]</span>`, ""))
+				movie["title"] = title
+				movie["title_english"] = title
+			}
+		}
+
+		// Extract year
+		if idx := strings.Index(part, `class="browse-movie-year"`); idx != -1 {
+			yearStart := strings.Index(part[idx:], `>`) + idx + 1
+			if yearEnd := strings.Index(part[yearStart:], `</div>`); yearEnd != -1 {
+				year := strings.TrimSpace(part[yearStart : yearStart+yearEnd])
+				movie["year"], _ = strconv.Atoi(year)
+			}
+		}
+
+		// Extract cover image
+		if idx := strings.Index(part, `<img src="`); idx != -1 {
+			imgStart := idx + len(`<img src="`)
+			if imgEnd := strings.Index(part[imgStart:], `"`); imgEnd != -1 {
+				imgURL := part[imgStart : imgStart+imgEnd]
+				movie["medium_cover_image"] = imgURL
+				movie["large_cover_image"] = imgURL
+			}
+		}
+
+		// Extract rating
+		if idx := strings.Index(part, `<h4 class="rating">`); idx != -1 {
+			ratingStart := idx + len(`<h4 class="rating">`)
+			if ratingEnd := strings.Index(part[ratingStart:], `</h4>`); ratingEnd != -1 {
+				ratingStr := strings.TrimSpace(part[ratingStart : ratingStart+ratingEnd])
+				ratingStr = strings.ReplaceAll(ratingStr, " / 10", "")
+				movie["rating"], _ = strconv.ParseFloat(ratingStr, 64)
+			}
+		}
+
+		movie["language"] = "zh"
+
+		// For torrents, we'll need to fetch the individual movie page
+		// For now, provide empty array - will be populated when user clicks
+		movie["torrents"] = []interface{}{}
+
+		if len(movie) > 0 {
+			movies = append(movies, movie)
+		}
+	}
+
+	return movies, totalPages
+}
+
+func extractCSRFToken(html string) string {
+	// Extract _token from meta tag or input field
+	if idx := strings.Index(html, `name="_token" content="`); idx != -1 {
+		start := idx + len(`name="_token" content="`)
+		if end := strings.Index(html[start:], `"`); end != -1 {
+			return html[start : start+end]
+		}
+	}
+	if idx := strings.Index(html, `name="_token" value="`); idx != -1 {
+		start := idx + len(`name="_token" value="`)
+		if end := strings.Index(html[start:], `"`); end != -1 {
+			return html[start : start+end]
+		}
+	}
+	return ""
+}
+
+func parseMoviesFromHTML(html string) []map[string]interface{} {
+	movies := []map[string]interface{}{}
+
+	// Simple HTML parsing to extract movie data
+	// Look for movie browse items
+	parts := strings.Split(html, `class="browse-movie-wrap`)
+
+	for i := 1; i < len(parts); i++ {
+		movie := make(map[string]interface{})
+		part := parts[i]
+
+		// Extract movie title
+		if idx := strings.Index(part, `class="browse-movie-title"`); idx != -1 {
+			if start := strings.Index(part[idx:], ">")+idx+1; start > idx {
+				if end := strings.Index(part[start:], "<")+start; end > start {
+					movie["title"] = strings.TrimSpace(part[start:end])
+					movie["title_english"] = movie["title"]
+					movie["title_long"] = movie["title"]
+				}
+			}
+		}
+
+		// Extract year
+		if idx := strings.Index(part, `class="browse-movie-year"`); idx != -1 {
+			if start := strings.Index(part[idx:], ">")+idx+1; start > idx {
+				if end := strings.Index(part[start:], "<")+start; end > start {
+					yearStr := strings.TrimSpace(part[start:end])
+					if year, err := strconv.Atoi(yearStr); err == nil {
+						movie["year"] = year
+					}
+				}
+			}
+		}
+
+		// Extract image
+		if idx := strings.Index(part, `<img src="`); idx != -1 {
+			start := idx + len(`<img src="`)
+			if end := strings.Index(part[start:], `"`); end != -1 {
+				imgURL := part[start : start+end]
+				movie["medium_cover_image"] = imgURL
+				movie["large_cover_image"] = imgURL
+			}
+		}
+
+		// Extract rating
+		movie["rating"] = 0.0
+		movie["language"] = "zh"
+		movie["state"] = "ok"
+
+		// Extract torrents/download links
+		torrents := []map[string]interface{}{}
+		if idx := strings.Index(part, `href="magnet:`); idx != -1 {
+			start := idx + len(`href="`)
+			if end := strings.Index(part[start:], `"`); end != -1 {
+				magnetURL := part[start : start+end]
+				torrent := map[string]interface{}{
+					"url":     magnetURL,
+					"quality": "720p",
+					"type":    "web",
+					"size":    "N/A",
+				}
+				torrents = append(torrents, torrent)
+			}
+		}
+		movie["torrents"] = torrents
+
+		if len(movie) > 2 {
+			movies = append(movies, movie)
+		}
+	}
+
+	return movies
+}
+
+// Fetch Avmoo Movies Handler
+func fetchAvmooMovies(w http.ResponseWriter, r *http.Request) {
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight requests
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get page parameter
+	page := r.URL.Query().Get("page")
+	if page == "" {
+		page = "1"
+	}
+
+	client := createSelectiveProxyClient()
+
+	// Construct URL with page parameter
+	fetchURL := fmt.Sprintf("https://avmoo.website/cn/page/%s", page)
+	if page == "1" {
+		fetchURL = "https://avmoo.website/cn"
+	}
+
+	req, err := http.NewRequest("GET", fetchURL, nil)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create request"})
+		return
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch page: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Server returned status %d", resp.StatusCode)})
+		return
+	}
+
+	htmlBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to read response"})
+		return
+	}
+
+	// Parse HTML to extract movie data
+	movies := parseAvmooMovies(string(htmlBody))
+
+	response := map[string]interface{}{
+		"status": "ok",
+		"data": map[string]interface{}{
+			"page":   page,
+			"movies": movies,
+		},
+	}
+
+	respondWithJSON(w, http.StatusOK, response)
+}
+
+func parseAvmooMovies(html string) []map[string]interface{} {
+	var movies []map[string]interface{}
+
+	// Look for movie items - they are typically in <div> or <a> tags with movie info
+	// Parse each movie block
+	parts := strings.Split(html, `<a class="movie-box"`)
+
+	for i := 1; i < len(parts); i++ {
+		part := parts[i]
+		movie := make(map[string]interface{})
+
+		// Extract movie link/ID
+		if idx := strings.Index(part, `href="`); idx != -1 {
+			linkStart := idx + len(`href="`)
+			if linkEnd := strings.Index(part[linkStart:], `"`); linkEnd != -1 {
+				link := part[linkStart : linkStart+linkEnd]
+				movie["link"] = link
+				// Extract ID from link if present
+				if strings.Contains(link, "/movie/") {
+					idParts := strings.Split(link, "/movie/")
+					if len(idParts) > 1 {
+						movie["id"] = idParts[1]
+					}
+				}
+			}
+		}
+
+		// Extract cover image
+		if idx := strings.Index(part, `<img src="`); idx != -1 {
+			imgStart := idx + len(`<img src="`)
+			if imgEnd := strings.Index(part[imgStart:], `"`); imgEnd != -1 {
+				imgURL := part[imgStart : imgStart+imgEnd]
+				movie["cover"] = imgURL
+			}
+		}
+
+		// Extract title
+		if idx := strings.Index(part, `<span class="video-title"`); idx != -1 {
+			titleStart := strings.Index(part[idx:], `>`) + idx + 1
+			if titleEnd := strings.Index(part[titleStart:], `</span>`); titleEnd != -1 {
+				title := strings.TrimSpace(part[titleStart : titleStart+titleEnd])
+				movie["title"] = title
+			}
+		}
+
+		// Extract date
+		if idx := strings.Index(part, `<date>`); idx != -1 {
+			dateStart := idx + len(`<date>`)
+			if dateEnd := strings.Index(part[dateStart:], `</date>`); dateEnd != -1 {
+				date := strings.TrimSpace(part[dateStart : dateStart+dateEnd])
+				movie["date"] = date
+			}
+		}
+
+		// For now, we'll fetch magnet links separately when user clicks on a movie
+		// because they're typically on the detail page
+		movie["magnetUrl"] = ""
+
+		if len(movie) > 0 {
+			movies = append(movies, movie)
+		}
+	}
+
+	return movies
+}
+
+// Fetch Avmoo Movie Detail (including magnet link)
+func fetchAvmooMovieDetail(w http.ResponseWriter, r *http.Request) {
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight requests
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract movie ID from URL path
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 6 {
+		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing movie ID"})
+		return
+	}
+	movieID := parts[5]
+
+	client := createSelectiveProxyClient()
+
+	// Construct movie detail URL
+	fetchURL := fmt.Sprintf("https://avmoo.website/cn/movie/%s", movieID)
+
+	req, err := http.NewRequest("GET", fetchURL, nil)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create request"})
+		return
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch page: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Server returned status %d", resp.StatusCode)})
+		return
+	}
+
+	htmlBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to read response"})
+		return
+	}
+
+	// Parse HTML to extract movie details and magnet link
+	movieDetail := parseAvmooMovieDetail(string(htmlBody))
+
+	response := map[string]interface{}{
+		"status": "ok",
+		"data":   movieDetail,
+	}
+
+	respondWithJSON(w, http.StatusOK, response)
+}
+
+func parseAvmooMovieDetail(html string) map[string]interface{} {
+	movie := make(map[string]interface{})
+
+	// Extract title
+	if idx := strings.Index(html, `<h3>`); idx != -1 {
+		titleStart := idx + len(`<h3>`)
+		if titleEnd := strings.Index(html[titleStart:], `</h3>`); titleEnd != -1 {
+			title := strings.TrimSpace(html[titleStart : titleStart+titleEnd])
+			movie["title"] = title
+		}
+	}
+
+	// Extract cover image
+	if idx := strings.Index(html, `<img class="bigImage"`); idx != -1 {
+		if imgIdx := strings.Index(html[idx:], `src="`); imgIdx != -1 {
+			imgStart := idx + imgIdx + len(`src="`)
+			if imgEnd := strings.Index(html[imgStart:], `"`); imgEnd != -1 {
+				imgURL := html[imgStart : imgStart+imgEnd]
+				movie["cover"] = imgURL
+			}
+		}
+	}
+
+	// Extract direct magnet link (if available)
+	if idx := strings.Index(html, `href="magnet:`); idx != -1 {
+		magnetStart := idx + len(`href="`)
+		if magnetEnd := strings.Index(html[magnetStart:], `"`); magnetEnd != -1 {
+			magnetURL := html[magnetStart : magnetStart+magnetEnd]
+			movie["magnetUrl"] = magnetURL
+		}
+	}
+
+	// Extract torrent search link (btsow.lol or similar)
+	if idx := strings.Index(html, `href="https://btsow.lol/#/search/`); idx != -1 {
+		searchStart := idx + len(`href="`)
+		if searchEnd := strings.Index(html[searchStart:], `"`); searchEnd != -1 {
+			searchURL := html[searchStart : searchStart+searchEnd]
+			movie["torrentSearchUrl"] = searchURL
+
+			// Extract the search query from the URL
+			if strings.Contains(searchURL, "/search/") {
+				parts := strings.Split(searchURL, "/search/")
+				if len(parts) > 1 {
+					query := parts[1]
+					movie["searchQuery"] = query
+					// Note: btsow.lol is a SPA, so we can't fetch magnets server-side
+					// User needs to click the torrentSearchUrl to get magnets
+				}
+			}
+		}
+	}
+
+	// Extract additional info if available
+	if idx := strings.Index(html, `<span class="header">發行日期:`); idx != -1 {
+		dateStart := strings.Index(html[idx:], `</span>`) + idx + len(`</span>`)
+		if dateEnd := strings.Index(html[dateStart:], `</p>`); dateEnd != -1 {
+			date := strings.TrimSpace(html[dateStart : dateStart+dateEnd])
+			movie["releaseDate"] = date
+		}
+	}
+
+	return movie
+}
+
+func fetchMagnetsFromBtsow(query string) []string {
+	var magnets []string
+
+	client := createSelectiveProxyClient()
+
+	// Try to fetch HTML search page
+	searchURL := fmt.Sprintf("https://btsow.lol/search/%s", url.QueryEscape(query))
+
+	req, err := http.NewRequest("GET", searchURL, nil)
+	if err != nil {
+		log.Printf("Error creating btsow request: %v", err)
+		return magnets
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept", "text/html")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Error fetching from btsow: %v", err)
+		return magnets
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Btsow returned status %d", resp.StatusCode)
+		return magnets
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading btsow response: %v", err)
+		return magnets
+	}
+
+	html := string(body)
+
+	// Look for magnet links in HTML
+	magnetPrefix := "magnet:?xt=urn:btih:"
+	parts := strings.Split(html, magnetPrefix)
+
+	for i := 1; i < len(parts); i++ {
+		// Find the end of the magnet link (usually at quote or &)
+		end := strings.IndexAny(parts[i], `"'<>&`)
+		if end == -1 {
+			end = 200 // Limit length
+		}
+		if end > len(parts[i]) {
+			end = len(parts[i])
+		}
+
+		magnetHash := parts[i][:end]
+		magnetURL := magnetPrefix + magnetHash
+
+		// Only add unique magnets
+		isDuplicate := false
+		for _, existing := range magnets {
+			if existing == magnetURL {
+				isDuplicate = true
+				break
+			}
+		}
+
+		if !isDuplicate && len(magnetURL) > 50 {
+			magnets = append(magnets, magnetURL)
+		}
+
+		// Limit to 10 results
+		if len(magnets) >= 10 {
+			break
+		}
+	}
+
+	log.Printf("Found %d magnet links for query: %s", len(magnets), query)
+	return magnets
 }
 
 // Convert Torrent to Magnet Handler
