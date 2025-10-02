@@ -54,6 +54,7 @@ type Settings struct {
 	EnableJackett  bool   `json:"enableJackett"`
 	JackettHost    string `json:"jackettHost"`
 	JackettApiKey  string `json:"jackettApiKey"`
+	YTSServerURL   string `json:"ytsServerUrl"` // YTS API server URL
 }
 
 type ProxySettings struct {
@@ -71,6 +72,10 @@ type JackettSettings struct {
 	EnableJackett bool   `json:"enableJackett"`
 	JackettHost   string `json:"jackettHost"`
 	JackettApiKey string `json:"jackettApiKey"`
+}
+
+type YTSSettings struct {
+	YTSServerURL string `json:"ytsServerUrl"`
 }
 
 var (
@@ -295,6 +300,7 @@ func init() {
 			EnableJackett:  false,
 			JackettHost:    "",
 			JackettApiKey:  "",
+			YTSServerURL:   "https://yts.mx/api/v2/list_movies.json", // Default to YTS.mx
 		}
 		// Create the config directory if it doesn't exist
 		if err := os.MkdirAll("config", 0755); err != nil {
@@ -325,6 +331,11 @@ func init() {
 		log.Fatalf("Failed to decode settings.json: %v", err)
 	}
 
+	// Set default YTS server URL if not set
+	if s.YTSServerURL == "" {
+		s.YTSServerURL = "https://yts.mx/api/v2/list_movies.json"
+	}
+
 	settingsMutex.Lock()
 	currentSettings = s
 	settingsMutex.Unlock()
@@ -352,6 +363,7 @@ func main() {
 	http.HandleFunc("/api/v1/settings/proxy", saveProxySettingsHandler)
 	http.HandleFunc("/api/v1/settings/prowlarr", saveProwlarrSettingsHandler)
 	http.HandleFunc("/api/v1/settings/jackett", saveJackettSettingsHandler)
+	http.HandleFunc("/api/v1/settings/yts", saveYTSSettingsHandler)
 	http.HandleFunc("/api/v1/prowlarr/search", searchFromProwlarr)
 	http.HandleFunc("/api/v1/jackett/search", searchFromJackett)
 	http.HandleFunc("/api/v1/prowlarr/test", testProwlarrConnection)
@@ -1373,6 +1385,36 @@ func saveJackettSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusOK, map[string]string{"message": "Jackett settings saved successfully"})
 }
 
+// YTS Settings Save Handler
+func saveYTSSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var newSettings YTSSettings
+	if err := json.NewDecoder(r.Body).Decode(&newSettings); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	settingsMutex.RLock()
+	currentSettings.YTSServerURL = newSettings.YTSServerURL
+	defer settingsMutex.RUnlock()
+
+	if err := saveSettingsToFile(); err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save settings: " + err.Error()})
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{"message": "YTS server settings saved successfully"})
+}
+
 // Fetch YTS Movies Handler - Uses YTS API directly
 func fetchYTSMovies(w http.ResponseWriter, r *http.Request) {
 	// Add CORS headers
@@ -1400,12 +1442,22 @@ func fetchYTSMovies(w http.ResponseWriter, r *http.Request) {
 
 	client := createSelectiveProxyClient()
 
-	// Use YTS API directly - much simpler and returns all movies
-	apiURL := fmt.Sprintf("https://yts.mx/api/v2/list_movies.json?page=%d&limit=20&sort_by=date_added&order_by=desc", pageNum)
+	// Get YTS server URL from settings
+	settingsMutex.RLock()
+	ytsServerURL := currentSettings.YTSServerURL
+	settingsMutex.RUnlock()
+
+	// Default to YTS.mx if not set
+	if ytsServerURL == "" {
+		ytsServerURL = "https://yts.mx/api/v2/list_movies.json"
+	}
+
+	// Build API URL with query parameters
+	apiURL := fmt.Sprintf("%s?page=%d&limit=20&sort_by=date_added&order_by=desc", ytsServerURL, pageNum)
 
 	// Add search query if provided
 	if searchQuery != "" {
-		apiURL = fmt.Sprintf("https://yts.mx/api/v2/list_movies.json?page=%d&limit=20&query_term=%s", pageNum, url.QueryEscape(searchQuery))
+		apiURL = fmt.Sprintf("%s?page=%d&limit=20&query_term=%s", ytsServerURL, pageNum, url.QueryEscape(searchQuery))
 	}
 
 	req, err := http.NewRequest("GET", apiURL, nil)
