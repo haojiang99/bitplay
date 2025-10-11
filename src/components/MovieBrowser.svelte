@@ -8,6 +8,9 @@
   let totalPages = 1;
   let searchQuery = '';
   let activeSearch = '';
+  let showFavorites = false;
+  let favorites = [];
+  let favoritedMovieIds = new Set();
 
   async function fetchMovies(page = 1, query = '') {
     loading = true;
@@ -143,15 +146,77 @@
     }
   }
 
+  async function fetchFavorites() {
+    try {
+      const response = await fetch('/api/v1/favorites');
+      if (!response.ok) {
+        throw new Error('Failed to fetch favorites');
+      }
+      const data = await response.json();
+      favorites = data || [];
+      favoritedMovieIds = new Set(favorites.map(m => m.id));
+    } catch (err) {
+      console.error('Error fetching favorites:', err);
+      favorites = [];
+      favoritedMovieIds = new Set();
+    }
+  }
+
+  async function toggleFavorite(movie) {
+    const isFavorited = favoritedMovieIds.has(movie.id);
+
+    try {
+      if (isFavorited) {
+        // Remove from favorites
+        const response = await fetch(`/api/v1/favorites/remove/${movie.id}`, {
+          method: 'DELETE',
+        });
+        if (!response.ok) throw new Error('Failed to remove favorite');
+      } else {
+        // Add to favorites
+        const response = await fetch('/api/v1/favorites/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            movie_id: movie.id,
+            title: movie.title,
+            year: movie.year,
+            rating: movie.rating,
+            runtime: movie.runtime,
+            genres: movie.genres || [],
+            summary: movie.summary || '',
+            cover_image: movie.medium_cover_image || '',
+            torrents: movie.torrents || [],
+          }),
+        });
+        if (!response.ok) throw new Error('Failed to add favorite');
+      }
+      // Refresh favorites list
+      await fetchFavorites();
+    } catch (err) {
+      console.error('Error toggling favorite:', err);
+      alert('Failed to update favorites');
+    }
+  }
+
+  function openFavorites() {
+    showFavorites = true;
+  }
+
+  function closeFavorites() {
+    showFavorites = false;
+  }
+
   onMount(() => {
     fetchMovies();
+    fetchFavorites();
   });
 </script>
 
 <div class="movie-browser">
   <h2 class="text-2xl md:text-3xl font-bold mb-4 text-center">Movies</h2>
 
-  <!-- Search Bar -->
+  <!-- Search Bar and Favorites Button -->
   <form on:submit={handleSearch} class="search-form mb-6">
     <div class="search-wrapper">
       <input
@@ -176,6 +241,12 @@
           Clear
         </button>
       {/if}
+      <button type="button" on:click={openFavorites} class="favorites-button">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+        </svg>
+        Favorites {#if favorites.length > 0}({favorites.length}){/if}
+      </button>
     </div>
     {#if activeSearch}
       <p class="search-info">Showing results for: <strong>{activeSearch}</strong></p>
@@ -208,6 +279,15 @@
             <div class="movie-rating absolute top-2 right-2 bg-black/70 text-white px-2 py-1 rounded text-sm font-semibold">
               ⭐ {movie.rating}
             </div>
+            <button
+              class="favorite-icon absolute top-2 left-2 bg-black/70 text-white p-2 rounded-full hover:bg-black/90 transition-colors"
+              on:click={() => toggleFavorite(movie)}
+              title={favoritedMovieIds.has(movie.id) ? 'Remove from favorites' : 'Add to favorites'}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill={favoritedMovieIds.has(movie.id) ? 'red' : 'none'} stroke={favoritedMovieIds.has(movie.id) ? 'red' : 'currentColor'} stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+              </svg>
+            </button>
           </div>
           <div class="movie-info p-3">
             <h3 class="movie-title font-semibold text-sm mb-1 line-clamp-2" title={movie.title}>
@@ -253,6 +333,83 @@
     </div>
   {/if}
 </div>
+
+<!-- Favorites Modal -->
+{#if showFavorites}
+  <div class="modal-overlay" on:click={closeFavorites}>
+    <div class="modal-content favorites-modal" on:click|stopPropagation>
+      <div class="modal-header">
+        <h2 class="text-2xl font-bold text-white">My Favorites</h2>
+        <button class="modal-close" on:click={closeFavorites} title="Close">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 6 6 18"></path>
+            <path d="m6 6 12 12"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="favorites-content">
+        {#if favorites.length === 0}
+          <div class="no-favorites">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+            </svg>
+            <p>No favorites yet</p>
+            <p class="text-sm">Add movies to your favorites by clicking the heart icon</p>
+          </div>
+        {:else}
+          <div class="movies-grid grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {#each favorites as movie}
+              <div class="movie-card rounded-lg overflow-hidden border border-border bg-card shadow-sm hover:shadow-lg transition-shadow">
+                <div class="movie-poster relative aspect-[2/3] overflow-hidden bg-muted">
+                  <img
+                    src={movie.medium_cover_image}
+                    alt={movie.title}
+                    class="w-full h-full object-cover"
+                    loading="lazy"
+                  />
+                  <div class="movie-rating absolute top-2 right-2 bg-black/70 text-white px-2 py-1 rounded text-sm font-semibold">
+                    ⭐ {movie.rating}
+                  </div>
+                  <button
+                    class="favorite-icon absolute top-2 left-2 bg-black/70 text-white p-2 rounded-full hover:bg-black/90 transition-colors"
+                    on:click={() => toggleFavorite(movie)}
+                    title="Remove from favorites"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="red" stroke="red" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+                    </svg>
+                  </button>
+                </div>
+                <div class="movie-info p-3">
+                  <h3 class="movie-title font-semibold text-sm mb-1 line-clamp-2" title={movie.title}>
+                    {movie.title}
+                  </h3>
+                  <p class="movie-year text-xs text-muted-foreground mb-2">{movie.year}</p>
+
+                  {#if movie.torrents && movie.torrents.length > 0}
+                    <div class="movie-torrents space-y-1">
+                      {#each movie.torrents as torrent}
+                        <button
+                          class="torrent-btn w-full text-xs py-1 px-2 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                          on:click={() => {
+                            closeFavorites();
+                            playMovie(torrent);
+                          }}
+                        >
+                          {torrent.quality} - {torrent.size}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- Video Player Modal -->
 {#if showModal}
@@ -357,6 +514,30 @@
 
   .clear-button:hover {
     background: hsl(var(--muted) / 0.8);
+  }
+
+  .favorites-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1.25rem;
+    border: none;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+
+  .favorites-button:hover {
+    background: hsl(var(--primary) / 0.9);
+  }
+
+  .favorite-icon {
+    cursor: pointer;
+    z-index: 1;
   }
 
   .search-info {
@@ -494,5 +675,60 @@
     color: rgba(255, 255, 255, 0.7);
     font-size: 0.875rem;
     margin: 0;
+  }
+
+  /* Favorites Modal Styles */
+  .favorites-modal {
+    max-width: 1400px;
+    max-height: 90vh;
+    background-color: hsl(var(--background));
+    display: flex;
+    flex-direction: column;
+  }
+
+  .favorites-modal .modal-header {
+    position: static;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem;
+    border-bottom: 1px solid hsl(var(--border));
+    background-color: hsl(var(--card));
+  }
+
+  .favorites-modal .modal-header h2 {
+    color: hsl(var(--foreground));
+    margin: 0;
+  }
+
+  .favorites-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem;
+  }
+
+  .no-favorites {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+    text-align: center;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .no-favorites svg {
+    margin-bottom: 1rem;
+    opacity: 0.5;
+  }
+
+  .no-favorites p {
+    margin: 0.5rem 0;
+    font-size: 1.125rem;
+  }
+
+  .no-favorites p.text-sm {
+    font-size: 0.875rem;
+    opacity: 0.7;
   }
 </style>

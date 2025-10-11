@@ -26,23 +26,28 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/net/proxy"
+
+	"database/sql"
+	_ "modernc.org/sqlite"
 )
 
 func init() {
-	// Disable all log output
-	log.SetOutput(io.Discard)
+	// Enable log output for debugging
+	log.SetOutput(os.Stdout)
 }
 
 var (
 	currentSettings Settings
 	settingsMutex   sync.RWMutex
+	db              *sql.DB
 )
 
 type TorrentSession struct {
-	Client   *torrent.Client
-	Torrent  *torrent.Torrent
-	Port     int
-	LastUsed time.Time
+	Client      *torrent.Client
+	Torrent     *torrent.Torrent
+	Port        int
+	LastUsed    time.Time
+	TempDataDir string // Track temp directory for cleanup
 }
 
 type Settings struct {
@@ -199,14 +204,24 @@ func releasePort(port int) {
 }
 
 // Initialize the torrent client with proxy settings
-func initTorrentWithProxy() (*torrent.Client, int, error) {
+// Returns: client, port, tempDir, error
+func initTorrentWithProxy() (*torrent.Client, int, string, error) {
 	settingsMutex.RLock()
 	enableProxy := currentSettings.EnableProxy
 	proxyURL := currentSettings.ProxyURL
 	settingsMutex.RUnlock()
 
 	config := torrent.NewDefaultClientConfig()
-	config.DefaultStorage = storage.NewFile("./torrent-data")
+
+	// Create unique temp directory for this session in OS temp location
+	// This will be automatically cleaned up by OS or our cleanup routine
+	tempDir, err := os.MkdirTemp("", "bitplay-torrent-*")
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	// Use temp directory for storage - will be deleted when session ends
+	config.DefaultStorage = storage.NewFile(tempDir)
 	port := getAvailablePort()
 	config.ListenPort = port
 
@@ -232,7 +247,8 @@ func initTorrentWithProxy() (*torrent.Client, int, error) {
 		proxyDialer, err := createProxyDialer(proxyURL)
 		if err != nil {
 			releasePort(port)
-			return nil, port, fmt.Errorf("could not create proxy dialer: %v", err)
+			os.RemoveAll(tempDir)
+			return nil, port, "", fmt.Errorf("could not create proxy dialer: %v", err)
 		}
 
 		config.HTTPProxy = func(*http.Request) (*url.URL, error) {
@@ -242,14 +258,15 @@ func initTorrentWithProxy() (*torrent.Client, int, error) {
 		client, err := torrent.NewClient(config)
 		if err != nil {
 			releasePort(port)
-			return nil, port, err
+			os.RemoveAll(tempDir) // Clean up temp dir on error
+			return nil, port, "", err
 		}
 
 		setValue(client, "dialerNetwork", func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return proxyDialer.Dial(network, addr)
 		})
 
-		return client, port, nil
+		return client, port, tempDir, nil
 	}
 
 	log.Println("Creating torrent client without proxy...")
@@ -261,9 +278,10 @@ func initTorrentWithProxy() (*torrent.Client, int, error) {
 	client, err := torrent.NewClient(config)
 	if err != nil {
 		releasePort(port)
-		return nil, port, err
+		os.RemoveAll(tempDir) // Clean up temp dir on error
+		return nil, port, "", err
 	}
-	return client, port, nil
+	return client, port, tempDir, nil
 }
 
 // Helper function to try to set a field value using reflection
@@ -341,9 +359,92 @@ func init() {
 	settingsMutex.Unlock()
 }
 
+// Initialize SQLite database for favorites
+func initDatabase() error {
+	// Create database in config directory
+	dbPath := filepath.Join("config", "favorites.db")
+
+	var err error
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Set connection pool settings
+	db.SetMaxOpenConns(1) // SQLite works best with single connection
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
+	// Enable WAL mode for better concurrency
+	_, err = db.Exec("PRAGMA journal_mode=WAL;")
+	if err != nil {
+		return fmt.Errorf("failed to set WAL mode: %w", err)
+	}
+
+	// Create favorites table
+	createTableSQL := `CREATE TABLE IF NOT EXISTS favorites (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		movie_id INTEGER NOT NULL UNIQUE,
+		title TEXT NOT NULL,
+		year INTEGER,
+		rating REAL,
+		runtime INTEGER,
+		genres TEXT,
+		summary TEXT,
+		cover_image TEXT,
+		torrents TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	_, err = db.Exec(createTableSQL)
+	if err != nil {
+		return fmt.Errorf("failed to create table: %w", err)
+	}
+
+	log.Println("Favorites database initialized successfully")
+	return nil
+}
+
+// Clean up old temp directories from previous runs
+func cleanupOldTempDirs() {
+	tempDir := os.TempDir()
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		log.Printf("Could not read temp directory: %v", err)
+		return
+	}
+
+	cleaned := 0
+	for _, entry := range entries {
+		// Look for our temp directories (bitplay-torrent-*)
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "bitplay-torrent-") {
+			fullPath := filepath.Join(tempDir, entry.Name())
+			if err := os.RemoveAll(fullPath); err != nil {
+				log.Printf("Failed to remove old temp dir %s: %v", fullPath, err)
+			} else {
+				cleaned++
+				log.Printf("Cleaned up old temp directory: %s", fullPath)
+			}
+		}
+	}
+
+	if cleaned > 0 {
+		log.Printf("Cleaned up %d old temp directories from previous runs", cleaned)
+	}
+}
+
 func main() {
 	// Seed random number generator
 	rand.Seed(time.Now().UnixNano())
+
+	// Initialize favorites database
+	if err := initDatabase(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+
+	// Clean up any leftover temp directories from previous runs
+	cleanupOldTempDirs()
 
 	// Force proxy for all Go HTTP connections
 	setGlobalProxy()
@@ -373,6 +474,11 @@ func main() {
 	http.HandleFunc("/api/v1/yts/movies", fetchYTSMovies)
 	http.HandleFunc("/api/v1/avmoo/movies", fetchAvmooMovies)
 	http.HandleFunc("/api/v1/avmoo/movie/", fetchAvmooMovieDetail)
+
+	// Favorites endpoints
+	http.HandleFunc("/api/v1/favorites", favoritesHandler)
+	http.HandleFunc("/api/v1/favorites/add", addFavoriteHandler)
+	http.HandleFunc("/api/v1/favorites/remove/", removeFavoriteHandler)
 
 	// Set up client file serving
 	http.Handle("/", http.FileServer(http.Dir("./client")))
@@ -526,7 +632,7 @@ func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use the simpler, more secure proxy configuration
-	client, port, err := initTorrentWithProxy()
+	client, port, tempDir, err := initTorrentWithProxy()
 	if err != nil {
 		log.Printf("Client creation error: %v", err)
 		respondWithJSON(w, http.StatusInternalServerError,
@@ -534,11 +640,15 @@ func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// if we bail out before session‑storage, make sure to release both client & port
+	// if we bail out before session‑storage, make sure to release resources
 	defer func() {
 		if client != nil {
 			releasePort(port)
 			client.Close()
+			// Clean up temp directory if session not created
+			if tempDir != "" {
+				os.RemoveAll(tempDir)
+			}
 		}
 	}()
 
@@ -559,14 +669,15 @@ func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := t.InfoHash().HexString()
 	log.Printf("Creating new session with ID: %s", sessionID)
 	sessions.Store(sessionID, &TorrentSession{
-		Client:   client,
-		Torrent:  t,
-		Port:     port,
-		LastUsed: time.Now(),
+		Client:      client,
+		Torrent:     t,
+		Port:        port,
+		LastUsed:    time.Now(),
+		TempDataDir: tempDir, // Store temp dir for cleanup
 	})
 
 	// Log successful storage
-	log.Printf("Successfully stored session: %s", sessionID)
+	log.Printf("Successfully stored session: %s (temp dir: %s)", sessionID, tempDir)
 
 	// Set client to nil so it doesn't get closed by the defer function
 	// since it's now stored in the sessions map
@@ -768,26 +879,43 @@ func respondWithJSON(w http.ResponseWriter, status int, data interface{}) {
 	json.NewEncoder(w).Encode(data)
 }
 
-// Update cleanupSessions with safer reflection
+// Update cleanupSessions with temp directory cleanup
 func cleanupSessions() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(2 * time.Minute) // Check more frequently
 	defer ticker.Stop()
 
 	for range ticker.C {
 		log.Printf("Checking for unused sessions...")
+		cleaned := 0
 		sessions.Range(func(key, value interface{}) bool {
 			session := value.(*TorrentSession)
 
-			if time.Since(session.LastUsed) > 15*time.Minute {
-				releasePort(session.Port)
+			// Clean up sessions inactive for more than 10 minutes
+			if time.Since(session.LastUsed) > 10*time.Minute {
+				// Drop torrent first
 				session.Torrent.Drop()
+				// Close client
 				session.Client.Close()
+				// Release port
+				releasePort(session.Port)
+				// Remove temp directory
+				if session.TempDataDir != "" {
+					os.RemoveAll(session.TempDataDir)
+					log.Printf("Deleted temp directory: %s", session.TempDataDir)
+				}
+				// Remove from map
 				sessions.Delete(key)
-				log.Printf("Removed unused session: %s", key)
+				cleaned++
+				log.Printf("Removed unused session: %s (inactive for %v)", key, time.Since(session.LastUsed))
 			}
 			return true
 		})
-		runtime.GC()
+
+		if cleaned > 0 {
+			// Force garbage collection to free memory
+			log.Printf("Cleaned %d sessions, forcing garbage collection", cleaned)
+			runtime.GC()
+		}
 	}
 }
 
@@ -1413,6 +1541,146 @@ func saveYTSSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, map[string]string{"message": "YTS server settings saved successfully"})
+}
+
+// Favorites Handlers
+func favoritesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rows, err := db.Query(`SELECT movie_id, title, year, rating, runtime, genres, summary, cover_image, torrents, created_at
+		FROM favorites ORDER BY created_at DESC`)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch favorites"})
+		return
+	}
+	defer rows.Close()
+
+	var favorites []map[string]interface{}
+	for rows.Next() {
+		var movieID int
+		var title, genres, summary, coverImage, torrents, createdAt string
+		var year, runtime int
+		var rating float64
+
+		err := rows.Scan(&movieID, &title, &year, &rating, &runtime, &genres, &summary, &coverImage, &torrents, &createdAt)
+		if err != nil {
+			continue
+		}
+
+		// Parse torrents JSON
+		var torrentsData []interface{}
+		json.Unmarshal([]byte(torrents), &torrentsData)
+
+		// Parse genres
+		var genresData []string
+		json.Unmarshal([]byte(genres), &genresData)
+
+		favorites = append(favorites, map[string]interface{}{
+			"id":                  movieID,
+			"title":               title,
+			"year":                year,
+			"rating":              rating,
+			"runtime":             runtime,
+			"genres":              genresData,
+			"summary":             summary,
+			"medium_cover_image":  coverImage,
+			"torrents":            torrentsData,
+		})
+	}
+
+	// Return empty array if no favorites
+	if favorites == nil {
+		favorites = []map[string]interface{}{}
+	}
+
+	respondWithJSON(w, http.StatusOK, favorites)
+}
+
+func addFavoriteHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var movie map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&movie); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	// Extract and marshal arrays
+	genresJSON, _ := json.Marshal(movie["genres"])
+	torrentsJSON, _ := json.Marshal(movie["torrents"])
+
+	_, err := db.Exec(`INSERT OR REPLACE INTO favorites
+		(movie_id, title, year, rating, runtime, genres, summary, cover_image, torrents)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		movie["movie_id"], movie["title"], movie["year"], movie["rating"], movie["runtime"],
+		string(genresJSON), movie["summary"], movie["cover_image"], string(torrentsJSON))
+
+	if err != nil {
+		log.Printf("Error adding favorite: %v", err)
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to add favorite"})
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{"message": "Added to favorites"})
+}
+
+func removeFavoriteHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract movie ID from URL path
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 6 {
+		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Movie ID required"})
+		return
+	}
+
+	movieID := parts[5]
+
+	// Convert string to int to match database INTEGER type
+	movieIDInt, err := strconv.Atoi(movieID)
+	if err != nil {
+		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid movie ID"})
+		return
+	}
+
+	_, err = db.Exec("DELETE FROM favorites WHERE movie_id = ?", movieIDInt)
+	if err != nil {
+		log.Printf("Error removing favorite: %v", err)
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to remove favorite"})
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{"message": "Removed from favorites"})
 }
 
 // Fetch YTS Movies Handler - Uses YTS API directly
