@@ -235,10 +235,7 @@ func initTorrentWithProxy() (*torrent.Client, int, string, error) {
 	// Set upload rate to 0 to prevent any uploading
 	config.UploadRateLimiter = nil
 
-	log.Println("Torrent client configured: Download-only mode (no uploading/seeding)")
-
 	if enableProxy {
-		log.Println("Creating torrent client with proxy...")
 		os.Setenv("ALL_PROXY", proxyURL)
 		os.Setenv("SOCKS_PROXY", proxyURL)
 		os.Setenv("HTTP_PROXY", proxyURL)
@@ -269,7 +266,6 @@ func initTorrentWithProxy() (*torrent.Client, int, string, error) {
 		return client, port, tempDir, nil
 	}
 
-	log.Println("Creating torrent client without proxy...")
 	os.Unsetenv("ALL_PROXY")
 	os.Unsetenv("SOCKS_PROXY")
 	os.Unsetenv("HTTP_PROXY")
@@ -401,7 +397,6 @@ func initDatabase() error {
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 
-	log.Println("Favorites database initialized successfully")
 	return nil
 }
 
@@ -410,26 +405,15 @@ func cleanupOldTempDirs() {
 	tempDir := os.TempDir()
 	entries, err := os.ReadDir(tempDir)
 	if err != nil {
-		log.Printf("Could not read temp directory: %v", err)
 		return
 	}
 
-	cleaned := 0
 	for _, entry := range entries {
 		// Look for our temp directories (bitplay-torrent-*)
 		if entry.IsDir() && strings.HasPrefix(entry.Name(), "bitplay-torrent-") {
 			fullPath := filepath.Join(tempDir, entry.Name())
-			if err := os.RemoveAll(fullPath); err != nil {
-				log.Printf("Failed to remove old temp dir %s: %v", fullPath, err)
-			} else {
-				cleaned++
-				log.Printf("Cleaned up old temp directory: %s", fullPath)
-			}
+			os.RemoveAll(fullPath)
 		}
-	}
-
-	if cleaned > 0 {
-		log.Printf("Cleaned up %d old temp directories from previous runs", cleaned)
 	}
 }
 
@@ -657,17 +641,13 @@ func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid magnet url"})
 		return
 	}
-	log.Printf("Torrent added: %s", t.InfoHash().HexString())
-
 	select {
 	case <-t.GotInfo():
-		log.Printf("Successfully got torrent info for %s", t.InfoHash().HexString())
 	case <-time.After(3 * time.Minute):
 		respondWithJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "Timeout getting info - proxy might be blocking BitTorrent traffic"})
 	}
 
 	sessionID := t.InfoHash().HexString()
-	log.Printf("Creating new session with ID: %s", sessionID)
 	sessions.Store(sessionID, &TorrentSession{
 		Client:      client,
 		Torrent:     t,
@@ -675,9 +655,6 @@ func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 		LastUsed:    time.Now(),
 		TempDataDir: tempDir, // Store temp dir for cleanup
 	})
-
-	// Log successful storage
-	log.Printf("Successfully stored session: %s (temp dir: %s)", sessionID, tempDir)
 
 	// Set client to nil so it doesn't get closed by the defer function
 	// since it's now stored in the sessions map
@@ -688,51 +665,27 @@ func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 
 // Torrent handler to serve torrent files and stream content
 func torrentHandler(w http.ResponseWriter, r *http.Request) {
-	// Log the entire URL path for debugging
-	log.Printf("Torrent handler called with path: %s", r.URL.Path)
-
 	// Extract sessionId and possibly fileIndex from the URL
 	parts := strings.Split(r.URL.Path, "/")
 
-	// Debug the path parts
-	log.Printf("Path parts: %v (length: %d)", parts, len(parts))
-
 	// The URL structure is /api/v1/torrent/[sessionId]/...
-	if len(parts) < 5 { // Changed from 4 to 5
-		log.Printf("Invalid path: not enough parts")
+	if len(parts) < 5 {
 		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid path"})
 		return
 	}
 
-	// The session ID is at position 4, not 3 (because array is 0-indexed and path starts with /)
-	sessionID := parts[4] // Changed from parts[3] to parts[4]
-
-	log.Printf("Looking for session with ID: %s", sessionID)
-
-	// Debug: Print all sessions that we have
-	var sessionKeys []string
-	sessions.Range(func(key, value interface{}) bool {
-		keyStr, ok := key.(string)
-		if ok {
-			sessionKeys = append(sessionKeys, keyStr)
-		}
-		return true
-	})
-	log.Printf("Available sessions: %v", sessionKeys)
+	// The session ID is at position 4
+	sessionID := parts[4]
 
 	// Get the torrent session from our sessions map
 	sessionValue, ok := sessions.Load(sessionID)
 	if !ok {
-		log.Printf("Session not found with ID: %s", sessionID)
 		respondWithJSON(w, http.StatusNotFound, map[string]string{
-			"error":              "Session not found",
-			"id":                 sessionID,
-			"available_sessions": strings.Join(sessionKeys, ", "),
+			"error": "Session not found",
+			"id":    sessionID,
 		})
 		return
 	}
-
-	log.Printf("Found session with ID: %s", sessionID)
 	session := sessionValue.(*TorrentSession)
 	session.LastUsed = time.Now() // Update last used time
 
@@ -764,8 +717,6 @@ func torrentHandler(w http.ResponseWriter, r *http.Request) {
 		// Set appropriate Content-Type based on file extension
 		fileName := file.DisplayPath()
 		extension := strings.ToLower(filepath.Ext(fileName))
-
-		log.Printf("Streaming file: %s (type: %s)", fileName, extension)
 
 		switch extension {
 		case ".mp4":
@@ -885,7 +836,6 @@ func cleanupSessions() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		log.Printf("Checking for unused sessions...")
 		cleaned := 0
 		sessions.Range(func(key, value interface{}) bool {
 			session := value.(*TorrentSession)
@@ -901,19 +851,16 @@ func cleanupSessions() {
 				// Remove temp directory
 				if session.TempDataDir != "" {
 					os.RemoveAll(session.TempDataDir)
-					log.Printf("Deleted temp directory: %s", session.TempDataDir)
 				}
 				// Remove from map
 				sessions.Delete(key)
 				cleaned++
-				log.Printf("Removed unused session: %s (inactive for %v)", key, time.Since(session.LastUsed))
 			}
 			return true
 		})
 
 		if cleaned > 0 {
 			// Force garbage collection to free memory
-			log.Printf("Cleaned %d sessions, forcing garbage collection", cleaned)
 			runtime.GC()
 		}
 	}
