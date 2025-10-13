@@ -36,16 +36,24 @@ func init() {
 }
 
 // Generate cache key from query parameters
-func getCacheKey(page, limit int, query string) string {
+func getCacheKey(page, limit int, query, sortBy, orderBy string) string {
 	if query != "" {
-		return fmt.Sprintf("search_%s_page_%d_limit_%d", query, page, limit)
+		return fmt.Sprintf("search_%s_page_%d_limit_%d_sort_%s_order_%s", query, page, limit, sortBy, orderBy)
 	}
-	return fmt.Sprintf("page_%d_limit_%d", page, limit)
+	return fmt.Sprintf("page_%d_limit_%d_sort_%s_order_%s", page, limit, sortBy, orderBy)
 }
 
 // Fetch data from YTS.mx API
-func fetchFromYTS(page, limit int, query string) (map[string]interface{}, error) {
-	apiURL := fmt.Sprintf("%s?page=%d&limit=%d&sort_by=date_added&order_by=desc", YTS_API_URL, page, limit)
+func fetchFromYTS(page, limit int, query, sortBy, orderBy string) (map[string]interface{}, error) {
+	// Set defaults
+	if sortBy == "" {
+		sortBy = "date_added"
+	}
+	if orderBy == "" {
+		orderBy = "desc"
+	}
+
+	apiURL := fmt.Sprintf("%s?page=%d&limit=%d&sort_by=%s&order_by=%s", YTS_API_URL, page, limit, sortBy, orderBy)
 
 	if query != "" {
 		apiURL = fmt.Sprintf("%s&query_term=%s", apiURL, url.QueryEscape(query))
@@ -121,29 +129,47 @@ func fetchFromYTS(page, limit int, query string) (map[string]interface{}, error)
 func syncCache() {
 	fmt.Printf("[%s] Starting cache sync...\n", time.Now().Format("15:04:05"))
 
-	// Sync first MAX_PAGES pages with default settings
-	for page := 1; page <= MAX_PAGES; page++ {
-		cacheKey := getCacheKey(page, 20, "")
+	// Define popular sort combinations to cache
+	sortCombinations := []struct {
+		sortBy  string
+		orderBy string
+		name    string
+	}{
+		{"date_added", "desc", "Latest"},
+		{"like_count", "desc", "Most Popular"},
+		{"download_count", "desc", "Most Downloaded"},
+		{"rating", "desc", "Top Rated"},
+		{"seeds", "desc", "Best Availability"},
+	}
 
-		data, err := fetchFromYTS(page, 20, "")
-		if err != nil {
-			fmt.Printf("[%s] Error syncing page %d: %v\n", time.Now().Format("15:04:05"), page, err)
-			continue
+	totalCached := 0
+	// Sync first few pages for each sort combination
+	for _, combo := range sortCombinations {
+		for page := 1; page <= 3; page++ { // Cache 3 pages for each sort type
+			cacheKey := getCacheKey(page, 20, "", combo.sortBy, combo.orderBy)
+
+			data, err := fetchFromYTS(page, 20, "", combo.sortBy, combo.orderBy)
+			if err != nil {
+				fmt.Printf("[%s] Error syncing %s page %d: %v\n", time.Now().Format("15:04:05"), combo.name, page, err)
+				continue
+			}
+
+			cache.Lock()
+			cache.data[cacheKey] = data
+			cache.Unlock()
+
+			totalCached++
+			// Small delay to avoid rate limiting
+			time.Sleep(500 * time.Millisecond)
 		}
-
-		cache.Lock()
-		cache.data[cacheKey] = data
-		cache.Unlock()
-
-		// Small delay to avoid rate limiting
-		time.Sleep(500 * time.Millisecond)
 	}
 
 	cache.Lock()
 	cache.lastSync = time.Now()
 	cache.Unlock()
 
-	fmt.Printf("[%s] Cache sync completed. Cached %d pages\n", time.Now().Format("15:04:05"), MAX_PAGES)
+	fmt.Printf("[%s] Cache sync completed. Cached %d pages across %d sort types\n",
+		time.Now().Format("15:04:05"), totalCached, len(sortCombinations))
 }
 
 // Start periodic sync
@@ -176,8 +202,18 @@ func handleListMovies(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(limitStr)
 
 	query := r.URL.Query().Get("query_term")
+	sortBy := r.URL.Query().Get("sort_by")
+	orderBy := r.URL.Query().Get("order_by")
 
-	cacheKey := getCacheKey(page, limit, query)
+	// Set defaults
+	if sortBy == "" {
+		sortBy = "date_added"
+	}
+	if orderBy == "" {
+		orderBy = "desc"
+	}
+
+	cacheKey := getCacheKey(page, limit, query, sortBy, orderBy)
 
 	// Try to get from cache first
 	cache.RLock()
@@ -189,12 +225,14 @@ func handleListMovies(w http.ResponseWriter, r *http.Request) {
 	if exists {
 		// Return cached data
 		result = cachedData.(map[string]interface{})
-		fmt.Printf("[%s] Serving from cache: %s\n", time.Now().Format("15:04:05"), cacheKey)
+		fmt.Printf("[%s] ✓ Cache hit: page=%d sort=%s order=%s\n",
+			time.Now().Format("15:04:05"), page, sortBy, orderBy)
 	} else {
 		// Fetch fresh data and cache it
-		fmt.Printf("[%s] Cache miss, fetching fresh: %s\n", time.Now().Format("15:04:05"), cacheKey)
+		fmt.Printf("[%s] ✗ Cache miss, fetching: page=%d sort=%s order=%s query=%s\n",
+			time.Now().Format("15:04:05"), page, sortBy, orderBy, query)
 
-		data, err := fetchFromYTS(page, limit, query)
+		data, err := fetchFromYTS(page, limit, query, sortBy, orderBy)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), http.StatusInternalServerError)
 			return
