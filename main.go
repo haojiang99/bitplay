@@ -1654,6 +1654,16 @@ func fetchYTSMovies(w http.ResponseWriter, r *http.Request) {
 	pageNum, _ := strconv.Atoi(requestedPage)
 
 	searchQuery := r.URL.Query().Get("query")
+	sortBy := r.URL.Query().Get("sort_by")
+	orderBy := r.URL.Query().Get("order_by")
+
+	// Set defaults
+	if sortBy == "" {
+		sortBy = "date_added"
+	}
+	if orderBy == "" {
+		orderBy = "desc"
+	}
 
 	client := createSelectiveProxyClient()
 
@@ -1668,11 +1678,11 @@ func fetchYTSMovies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build API URL with query parameters
-	apiURL := fmt.Sprintf("%s?page=%d&limit=20&sort_by=date_added&order_by=desc", ytsServerURL, pageNum)
+	apiURL := fmt.Sprintf("%s?page=%d&limit=20&sort_by=%s&order_by=%s", ytsServerURL, pageNum, sortBy, orderBy)
 
 	// Add search query if provided
 	if searchQuery != "" {
-		apiURL = fmt.Sprintf("%s?page=%d&limit=20&query_term=%s", ytsServerURL, pageNum, url.QueryEscape(searchQuery))
+		apiURL += fmt.Sprintf("&query_term=%s", url.QueryEscape(searchQuery))
 	}
 
 	req, err := http.NewRequest("GET", apiURL, nil)

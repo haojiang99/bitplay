@@ -11,16 +11,28 @@
   let showFavorites = false;
   let favorites = [];
   let favoritedMovieIds = new Set();
+  let selectedFilter = 'like_count'; // Default filter - Most Popular
+  let showFilterPanel = false; // Filter panel visibility state
 
-  async function fetchMovies(page = 1, query = '') {
+  const filterOptions = [
+    { value: 'date_added', label: 'Latest Movies', icon: '🆕' },
+    { value: 'download_count', label: 'Most Downloaded', icon: '⬇️' },
+    { value: 'like_count', label: 'Most Popular', icon: '🔥' },
+    { value: 'rating', label: 'Top Rated', icon: '⭐' },
+    { value: 'seeds', label: 'Best Availability', icon: '🌱' },
+  ];
+
+  async function fetchMovies(page = 1, query = '', sortBy = selectedFilter) {
     loading = true;
     error = null;
 
     try {
-      let url = `/api/v1/yts/movies?page=${page}`;
+      let url = `/api/v1/yts/movies?page=${page}&sort_by=${sortBy}&order_by=desc`;
       if (query && query.trim()) {
         url += `&query=${encodeURIComponent(query.trim())}`;
       }
+
+      console.log('Fetching movies with:', { page, query, sortBy, url });
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -51,14 +63,14 @@
   function handleSearch(event) {
     event.preventDefault();
     currentPage = 1;
-    fetchMovies(1, searchQuery);
+    fetchMovies(1, searchQuery, selectedFilter);
   }
 
   function clearSearch() {
     searchQuery = '';
     activeSearch = '';
     currentPage = 1;
-    fetchMovies(1, '');
+    fetchMovies(1, '', selectedFilter);
   }
 
   let showModal = false;
@@ -136,14 +148,25 @@
 
   function nextPage() {
     if (currentPage < totalPages) {
-      fetchMovies(currentPage + 1, activeSearch);
+      fetchMovies(currentPage + 1, activeSearch, selectedFilter);
     }
   }
 
   function prevPage() {
     if (currentPage > 1) {
-      fetchMovies(currentPage - 1, activeSearch);
+      fetchMovies(currentPage - 1, activeSearch, selectedFilter);
     }
+  }
+
+  function selectFilter(filterValue) {
+    console.log('Filter selected:', filterValue);
+    selectedFilter = filterValue;
+    currentPage = 1;
+    fetchMovies(1, activeSearch, filterValue);
+  }
+
+  function toggleFilterPanel() {
+    showFilterPanel = !showFilterPanel;
   }
 
   async function fetchFavorites() {
@@ -207,6 +230,9 @@
     showFavorites = false;
   }
 
+  // Get current filter label for display
+  $: currentFilterLabel = filterOptions.find(f => f.value === selectedFilter)?.label || 'Movies';
+
   onMount(() => {
     fetchMovies();
     fetchFavorites();
@@ -214,8 +240,46 @@
 </script>
 
 <div class="movie-browser">
-  <h2 class="text-2xl md:text-3xl font-bold mb-4 text-center">Movies</h2>
+  <h2 class="text-2xl md:text-3xl font-bold mb-4 text-center">
+    <span class="filter-label-display">{currentFilterLabel}</span>
+  </h2>
 
+  <!-- Filter Toggle Button - Hidden when panel is open -->
+  {#if !showFilterPanel}
+    <button class="filter-toggle" on:click={toggleFilterPanel} title="Toggle Filters">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="3" y1="6" x2="21" y2="6"></line>
+        <line x1="3" y1="12" x2="21" y2="12"></line>
+        <line x1="3" y1="18" x2="21" y2="18"></line>
+      </svg>
+    </button>
+  {/if}
+
+  <!-- Filter Side Panel -->
+  <div class="filter-panel {showFilterPanel ? 'open' : ''}">
+    <div class="filter-header">
+      <h3 class="filter-title">Browse By</h3>
+      <button class="filter-close" on:click={toggleFilterPanel} title="Close Filters">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 6 6 18"></path>
+          <path d="m6 6 12 12"></path>
+        </svg>
+      </button>
+    </div>
+    <div class="filter-options">
+      {#each filterOptions as filter}
+        <button
+          class="filter-option {selectedFilter === filter.value ? 'active' : ''}"
+          on:click={() => selectFilter(filter.value)}
+        >
+          <span class="filter-icon">{filter.icon}</span>
+          <span class="filter-label">{filter.label}</span>
+        </button>
+      {/each}
+    </div>
+  </div>
+
+  <div class="main-content">
   <!-- Search Bar and Favorites Button -->
   <form on:submit={handleSearch} class="search-form mb-6">
     <div class="search-wrapper">
@@ -332,6 +396,7 @@
       </button>
     </div>
   {/if}
+  </div>
 </div>
 
 <!-- Favorites Modal -->
@@ -448,7 +513,182 @@
 <style>
   .movie-browser {
     width: 100%;
-    padding: 1rem 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Filter Toggle Button */
+  .filter-toggle {
+    position: fixed;
+    left: 1rem;
+    top: 130px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    border: none;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: all 0.3s;
+    z-index: 101;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  }
+
+  .filter-toggle:hover {
+    background: hsl(var(--primary) / 0.9);
+    transform: scale(1.05);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  }
+
+  .filter-toggle.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* Filter Panel Styles */
+  .filter-panel {
+    position: fixed;
+    left: -320px;
+    top: 0;
+    width: 320px;
+    height: 100vh;
+    background: rgb(255, 255, 255);
+    border-right: 1px solid hsl(var(--border));
+    padding: 2rem 1.5rem;
+    overflow-y: auto;
+    z-index: 1000;
+    transition: transform 0.25s ease-out;
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25);
+  }
+
+  :global(.dark) .filter-panel {
+    background: rgb(23, 23, 23);
+  }
+
+  .filter-panel.open {
+    transform: translateX(320px);
+  }
+
+  .filter-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+  }
+
+  .filter-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: hsl(var(--foreground));
+    margin: 0;
+  }
+
+  .filter-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: hsl(var(--muted));
+    border: none;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: hsl(var(--foreground));
+  }
+
+  .filter-close:hover {
+    background: hsl(var(--accent));
+  }
+
+  .filter-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .filter-option {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border: none;
+    border-radius: 0.5rem;
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: left;
+    width: 100%;
+  }
+
+  .filter-option:hover {
+    background: hsl(var(--accent));
+  }
+
+  .filter-option.active {
+    background: #3b82f6;
+    color: white;
+    font-weight: 700;
+    border: 2px solid #2563eb;
+  }
+
+  .filter-icon {
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+
+  .filter-label {
+    flex: 1;
+  }
+
+  .main-content {
+    width: 100%;
+    padding: 0 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  @media (max-width: 768px) {
+    .filter-toggle {
+      width: 44px;
+      height: 44px;
+      left: 0.5rem;
+      top: 130px;
+    }
+
+    .filter-panel {
+      left: -85%;
+      width: 85%;
+      padding: 1.5rem 1rem;
+    }
+
+    .filter-panel.open {
+      transform: translateX(100%);
+    }
+
+    .filter-options {
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .filter-option {
+      width: 100%;
+      padding: 0.75rem 1rem;
+    }
+
+    .main-content {
+      width: 100%;
+      padding: 0 1rem;
+    }
   }
 
   /* Search Bar Styles */
