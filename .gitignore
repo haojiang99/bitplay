@@ -15,3 +15,16 @@ client/assets/chunks/
 # Editor directories
 .vscode/
 .idea/
+*.db
+/binaries
+/downloads
+/sync_server/dist
+*.zip
+*.exe
+bitplay-mac-arm64
+bitplay-mac-amd64
+bitplay-linux-amd64
+bitplay-test
+bitplay-universal
+*.db-shm
+*.db-wal
