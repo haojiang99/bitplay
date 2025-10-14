@@ -122,6 +122,7 @@
 
   function closeModal() {
     showModal = false;
+    isLoading = false;
     // Stop video playback
     const videoPlayer = document.getElementById('video-player');
     if (videoPlayer) {
@@ -130,6 +131,10 @@
         player.pause();
       }
     }
+  }
+
+  function closeLoadingOverlay() {
+    isLoading = false;
   }
 
   function toggleFullscreen() {
@@ -499,6 +504,12 @@
       <div class="modal-video-container">
         {#if isLoading}
           <div class="loading-overlay">
+            <button class="loading-close" on:click={closeLoadingOverlay} title="Close loading overlay">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6 6 18"></path>
+                <path d="m6 6 12 12"></path>
+              </svg>
+            </button>
             <div class="loading-spinner"></div>
             <p class="loading-text">Loading video... Please wait</p>
             <p class="loading-subtext">This may take a few seconds to a few minutes</p>
@@ -892,6 +903,29 @@
     justify-content: center;
     background-color: rgba(0, 0, 0, 0.8);
     z-index: 10;
+  }
+
+  .loading-close {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    background-color: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: white;
+    transition: all 0.2s;
+    z-index: 11;
+  }
+
+  .loading-close:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.5);
   }
 
   .loading-spinner {
